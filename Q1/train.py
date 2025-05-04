@@ -1,3 +1,7 @@
+# This script is generated with the aid of LLM (ChatGPT4o) for a template of DDPG.
+# However, it is mostly similar to the code of last homework (HW3 Q4), which was solely coded on my own (w/ ref. cited in the HW3 Q4 code).
+# Reference to the DDPG algorithm can be found in the class materials.
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -6,6 +10,12 @@ from collections import deque
 import random
 import matplotlib.pyplot as plt
 from tqdm import tqdm
+
+def make_env():
+    # Create Pendulum-v1 environment
+    env = gym.make("Pendulum-v1", render_mode='rgb_array')
+    return env
+
 
 # Actor (policy network)
 class Actor(nn.Module):
@@ -63,16 +73,16 @@ class ReplayBuffer:
 
 
 class DDPGAgent:
-    def __init__(self, state_dim, act_dim, max_action, device='cpu'):
+    def __init__(self, state_dim, act_dim, max_action, device='cpu', lr=5e-4):
         self.device = device
-        self.actor = Actor(state_dim, act_dim, max_action)
-        self.critic = Critic(state_dim, act_dim)
-        self.target_actor = Actor(state_dim, act_dim, max_action)
-        self.target_critic = Critic(state_dim, act_dim)
+        self.actor = Actor(state_dim, act_dim, max_action).to(self.device)
+        self.critic = Critic(state_dim, act_dim).to(self.device)
+        self.target_actor = Actor(state_dim, act_dim, max_action).to(self.device)
+        self.target_critic = Critic(state_dim, act_dim).to(self.device)
 
         self.loss_func = nn.MSELoss()
-        self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=1e-3)
-        self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=1e-3)
+        self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=lr)
+        self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=lr)
 
         self.max_action = max_action
         self.gamma = 0.99
@@ -94,13 +104,13 @@ class DDPGAgent:
             target_param.data.copy_(tau * param + (1 - tau) * target_param)
 
     def act(self, obs, noise=0.1):
-        obs_tensor = torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
-        action = self.actor(obs_tensor).detach().numpy()[0]
+        obs_tensor = torch.tensor(obs, dtype=torch.float32).unsqueeze(0).to(self.device)
+        action = self.actor(obs_tensor).detach().cpu().numpy()[0]
         return np.clip(action + noise * np.random.randn(*action.shape), -self.max_action, self.max_action)
 
     def train(self):
         if len(self.replay_buffer) < self.batch_size:
-            return
+            return np.nan, np.nan
 
         state, action, reward, next_state, done = self.replay_buffer.sample(self.batch_size)
 
@@ -122,6 +132,23 @@ class DDPGAgent:
 
         self._update_targets()
 
+        return critic_loss.item(), actor_loss.item()
+
+    def save(self):
+        torch.save({
+            "actor": self.actor.state_dict(),
+            "critic": self.critic.state_dict(),
+            "target_actor": self.target_actor.state_dict(),
+            "target_critic": self.target_critic.state_dict()
+        }, "ckpt.pt")
+    
+    def load(self, ckpt_name="ckpt.pt"):
+        state_dict = torch.load(ckpt_name, map_location=torch.device(self.device), weights_only=True)
+        self.actor.load_state_dict(state_dict["actor"])
+        self.critic.load_state_dict(state_dict["critic"])
+        self.target_actor.load_state_dict(state_dict["target_actor"])
+        self.target_critic.load_state_dict(state_dict["target_critic"])
+
 def train():
 
     env = make_env()
@@ -132,10 +159,10 @@ def train():
     print("Action dim:", act_dim)
     print("Max action:", max_action)
     
-    agent = DDPGAgent(state_dim, act_dim, max_action)
+    agent = DDPGAgent(state_dim, act_dim, max_action, device="cuda")
 
     episode_rewards = []
-    num_episodes = 200
+    num_episodes = 1000
 
     for episode in tqdm(range(num_episodes)):
         obs, _ = env.reset()
@@ -149,14 +176,15 @@ def train():
             done = terminated or truncated
             agent.replay_buffer.add((obs, action, reward, next_obs, float(done)))
 
-            agent.train()
+            critic_loss, actor_loss = agent.train()
             obs = next_obs
             total_reward += reward
             step += 1
-            print("\rStep:", step, "Action:", action, "Reward:", reward, "Total reward:", total_reward)
+            print(f"\rStep: {step}, Total reward: {total_reward:.2f}, Critic loss: {critic_loss:.2f}, Actor loss: {actor_loss:.2f}", end="")
 
+        agent.save()
         episode_rewards.append(total_reward)
-        print(f"Episode {episode}: reward = {total_reward:.2f}")
+        print(f"\nEpisode {episode}: step: {step}, total reward: {total_reward:.2f}     ")
 
         if (episode+1)%10 == 0:
             plt.plot(episode_rewards)
@@ -167,3 +195,6 @@ def train():
             plt.close()
 
     env.close()
+
+if __name__=="__main__":
+    train()
