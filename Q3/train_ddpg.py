@@ -1,8 +1,6 @@
 # This script is generated with the aid of LLM (ChatGPT4o) for a template of DDPG.
 # However, it is mostly similar to the code of last homework (HW3 Q4), which was solely coded on my own (w/ ref. cited in the HW3 Q4 code).
-# Reference to the DDPG algorithm can be found in 
-# [1] the class materials.
-# [2] https://github.com/sfujim/TD3/blob/master/DDPG.py
+# Reference to the DDPG algorithm can be found in the class materials.
 
 import numpy as np
 import torch
@@ -17,21 +15,21 @@ from dmc import make_dmc_env
 
 def make_env():
 	# Create environment with state observations
-	env_name = "cartpole-balance"
+	env_name = "humanoid-walk"
 	env = make_dmc_env(env_name, np.random.randint(0, 1000000), flatten=True, use_pixels=False)
 	return env
 
 
 # Actor (policy network)
 class Actor(nn.Module):
-    def __init__(self, state_dim, act_dim, max_action):
+    def __init__(self, state_dim, act_dim, max_action, hidden_dim=256):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(state_dim, 256),
+            nn.Linear(state_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(256, 256),
+            nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(256, act_dim),
+            nn.Linear(hidden_dim, act_dim),
             nn.Tanh() # output: [-1, 1]
         )
         self.max_action = max_action
@@ -41,14 +39,14 @@ class Actor(nn.Module):
 
 # Critic (value network)
 class Critic(nn.Module):
-    def __init__(self, state_dim, act_dim):
+    def __init__(self, state_dim, act_dim, hidden_dim=256):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(state_dim + act_dim, 256),
+            nn.Linear(state_dim + act_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(256, 256),
+            nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(256, 1)
+            nn.Linear(hidden_dim, 1)
         )
 
     def forward(self, x, u):
@@ -59,8 +57,8 @@ class ReplayBuffer:
         self.buffer = deque(maxlen=size)
         self.device = device
 
-    def add(self, item):
-        self.buffer.append(item)
+    def add(self, transition):
+        self.buffer.append(transition)
 
     def sample(self, batch_size):
         batch = random.sample(self.buffer, batch_size)
@@ -78,12 +76,12 @@ class ReplayBuffer:
 
 
 class DDPGAgent:
-    def __init__(self, state_dim, act_dim, max_action, device='cpu', lr=5e-4):
+    def __init__(self, state_dim, act_dim, max_action, device='cpu', lr=3e-4, hidden_dim=384):
         self.device = device
-        self.actor = Actor(state_dim, act_dim, max_action).to(self.device)
-        self.critic = Critic(state_dim, act_dim).to(self.device)
-        self.target_actor = Actor(state_dim, act_dim, max_action).to(self.device)
-        self.target_critic = Critic(state_dim, act_dim).to(self.device)
+        self.actor = Actor(state_dim, act_dim, max_action, hidden_dim).to(self.device)
+        self.critic = Critic(state_dim, act_dim, hidden_dim).to(self.device)
+        self.target_actor = Actor(state_dim, act_dim, max_action, hidden_dim).to(self.device)
+        self.target_critic = Critic(state_dim, act_dim, hidden_dim).to(self.device)
 
         self.loss_func = nn.MSELoss()
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=lr)
@@ -92,10 +90,10 @@ class DDPGAgent:
         self.max_action = max_action
         self.gamma = 0.99
         self.tau = 0.005
-        self.capacity = 1000000
+        self.capacity = 1_000_000
 
         self.replay_buffer = ReplayBuffer(size=self.capacity, device=device)
-        self.batch_size = 64
+        self.batch_size = 256 #64
 
         self.target_actor.load_state_dict(self.actor.state_dict())
         self.target_critic.load_state_dict(self.critic.state_dict())
@@ -143,9 +141,9 @@ class DDPGAgent:
             "critic": self.critic.state_dict(),
             "target_actor": self.target_actor.state_dict(),
             "target_critic": self.target_critic.state_dict()
-        }, "ckpt_q2.pt")
+        }, "ckpt_q3_ddpg.pt")
     
-    def load(self, ckpt_name="ckpt_q2.pt"):
+    def load(self, ckpt_name="ckpt_q3_ddpg.pt"):
         state_dict = torch.load(ckpt_name, map_location=torch.device(self.device), weights_only=True)
         self.actor.load_state_dict(state_dict["actor"])
         self.critic.load_state_dict(state_dict["critic"])
@@ -164,14 +162,15 @@ def train():
     
     agent = DDPGAgent(state_dim, act_dim, max_action, device="cuda")
 
-    reward_history = []
-    num_episodes = 300
+    episode_rewards = []
+    num_episodes = 20000
 
     for episode in tqdm(range(num_episodes)):
         obs, _ = env.reset()
         total_reward = 0
         done = False
         step = 0
+        print(flush=True)
 
         while not done:
             action = agent.act(obs)
@@ -183,18 +182,21 @@ def train():
             obs = next_obs
             total_reward += reward
             step += 1
-            print(f"\rStep: {step}, Total reward: {total_reward:.2f}, Critic loss: {critic_loss:.2f}, Actor loss: {actor_loss:.2f}", end="")
+            
+            print(f"\rStep: {step}, Reward: {reward}, Total reward: {total_reward},",
+                f"Critic loss: {critic_loss:.2f}, Actor loss: {actor_loss:.2f}", 
+                end="", flush=True)
 
         agent.save()
-        reward_history.append(total_reward)
-        print(f"\nEpisode {episode}: step: {step}, total reward: {total_reward:.2f}     ")
+        episode_rewards.append(total_reward)
+        print(f"\nEpisode {episode}: step: {step}, total reward: {total_reward:.2f}     ", flush=True)
 
         if (episode+1)%10 == 0:
-            plt.plot(reward_history)
+            plt.plot(episode_rewards)
             plt.xlabel('Episode')
             plt.ylabel('Total Reward')
             plt.title('Training Progress')
-            plt.savefig('training_progress.png')
+            plt.savefig('training_progress_ddpg.png')
             plt.close()
 
     env.close()

@@ -1,6 +1,8 @@
 # This script is generated with the aid of LLM (ChatGPT4o) for a template of DDPG.
 # However, it is mostly similar to the code of last homework (HW3 Q4), which was solely coded on my own (w/ ref. cited in the HW3 Q4 code).
-# Reference to the DDPG algorithm can be found in the class materials.
+# Reference to the DDPG algorithm can be found in 
+# [1] the class materials.
+# [2] https://github.com/sfujim/TD3/blob/master/DDPG.py
 
 import numpy as np
 import torch
@@ -48,14 +50,13 @@ class Critic(nn.Module):
 
     def forward(self, x, u):
         return self.net(torch.cat([x, u], dim=-1))
-
 class ReplayBuffer:
     def __init__(self, size=100000, device='cpu'):
         self.buffer = deque(maxlen=size)
         self.device = device
 
-    def add(self, transition):
-        self.buffer.append(transition)
+    def add(self, item):
+        self.buffer.append(item)
 
     def sample(self, batch_size):
         batch = random.sample(self.buffer, batch_size)
@@ -92,16 +93,12 @@ class DDPGAgent:
         self.replay_buffer = ReplayBuffer(size=self.capacity, device=device)
         self.batch_size = 64
 
-        self._update_targets(tau=1.0) # equivalent to copying weights
-
-    def _update_targets(self, tau=None):
-        tau = self.tau if tau is None else tau
-
-        for target_param, param in zip(self.target_actor.parameters(), self.actor.parameters()):
-            target_param.data.copy_(tau * param + (1 - tau) * target_param)
-        
-        for target_param, param in zip(self.target_critic.parameters(), self.critic.parameters()):
-            target_param.data.copy_(tau * param + (1 - tau) * target_param)
+        self.target_actor.load_state_dict(self.actor.state_dict())
+        self.target_critic.load_state_dict(self.critic.state_dict())
+            
+    def _soft_update(self, target, online):
+        for t_param, param in zip(target.parameters(), online.parameters()):
+            t_param.data.copy_(self.tau * param + (1 - self.tau) * t_param)
 
     def act(self, obs, noise=0.1):
         obs_tensor = torch.tensor(obs, dtype=torch.float32).unsqueeze(0).to(self.device)
@@ -130,7 +127,8 @@ class DDPGAgent:
         actor_loss.backward()
         self.actor_optimizer.step()
 
-        self._update_targets()
+        self._soft_update(self.target_actor, self.actor)
+        self._soft_update(self.target_critic, self.critic)
 
         return critic_loss.item(), actor_loss.item()
 
@@ -161,7 +159,7 @@ def train():
     
     agent = DDPGAgent(state_dim, act_dim, max_action, device="cuda")
 
-    episode_rewards = []
+    reward_history = []
     num_episodes = 1000
 
     for episode in tqdm(range(num_episodes)):
@@ -183,11 +181,11 @@ def train():
             print(f"\rStep: {step}, Total reward: {total_reward:.2f}, Critic loss: {critic_loss:.2f}, Actor loss: {actor_loss:.2f}", end="")
 
         agent.save()
-        episode_rewards.append(total_reward)
+        reward_history.append(total_reward)
         print(f"\nEpisode {episode}: step: {step}, total reward: {total_reward:.2f}     ")
 
         if (episode+1)%10 == 0:
-            plt.plot(episode_rewards)
+            plt.plot(reward_history)
             plt.xlabel('Episode')
             plt.ylabel('Total Reward')
             plt.title('Training Progress')
