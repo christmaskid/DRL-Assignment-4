@@ -76,7 +76,7 @@ class ReplayBuffer:
 
 
 class DDPGAgent:
-    def __init__(self, state_dim, act_dim, max_action, device='cpu', lr=3e-4, hidden_dim=384):
+    def __init__(self, state_dim, act_dim, max_action, device='cpu', lr=2.5e-4, hidden_dim=256):
         self.device = device
         self.actor = Actor(state_dim, act_dim, max_action, hidden_dim).to(self.device)
         self.critic = Critic(state_dim, act_dim, hidden_dim).to(self.device)
@@ -93,7 +93,7 @@ class DDPGAgent:
         self.capacity = 1_000_000
 
         self.replay_buffer = ReplayBuffer(size=self.capacity, device=device)
-        self.batch_size = 256 #64
+        self.batch_size = 64
 
         self.target_actor.load_state_dict(self.actor.state_dict())
         self.target_critic.load_state_dict(self.critic.state_dict())
@@ -103,10 +103,13 @@ class DDPGAgent:
         for t_param, param in zip(target.parameters(), online.parameters()):
             t_param.data.copy_(self.tau * param + (1 - self.tau) * t_param)
 
-    def act(self, obs, noise=0.1):
+    def act(self, obs, deterministic=False):
         obs_tensor = torch.tensor(obs, dtype=torch.float32).unsqueeze(0).to(self.device)
-        action = self.actor(obs_tensor).detach().cpu().numpy()[0]
-        return np.clip(action + noise * np.random.randn(*action.shape), -self.max_action, self.max_action)
+        action = self.actor(obs_tensor)
+        if not deterministic:
+            noise = torch.distributions.Normal(0, 0.2).rsample().to(self.device)
+            action = torch.clamp(action + noise * torch.rand_like(action), -self.max_action, self.max_action)
+        return action.detach().cpu().numpy()[0]
 
     def train(self):
         if len(self.replay_buffer) < self.batch_size:
@@ -163,7 +166,7 @@ def train():
     agent = DDPGAgent(state_dim, act_dim, max_action, device="cuda")
 
     episode_rewards = []
-    num_episodes = 20000
+    num_episodes = 10000
 
     for episode in tqdm(range(num_episodes)):
         obs, _ = env.reset()
@@ -173,7 +176,7 @@ def train():
         print(flush=True)
 
         while not done:
-            action = agent.act(obs)
+            action = agent.act(obs, deterministic=False)
             next_obs, reward, terminated, truncated, _ = env.step(action)
             done = terminated or truncated
             agent.replay_buffer.add((obs, action, reward, next_obs, float(done)))
@@ -184,7 +187,7 @@ def train():
             step += 1
             
             print(f"\rStep: {step}, Reward: {reward}, Total reward: {total_reward},",
-                f"Critic loss: {critic_loss:.2f}, Actor loss: {actor_loss:.2f}", 
+                f"Critic loss: {critic_loss:.8f}, Actor loss: {actor_loss:.8f}", 
                 end="", flush=True)
 
         agent.save()
