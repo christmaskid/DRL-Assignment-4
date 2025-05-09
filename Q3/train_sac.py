@@ -1,9 +1,8 @@
 # This script is generated with the aid of LLM (ChatGPT4o) for a template of DDPG.
 # However, it is mostly similar to the code of last homework (HW3 Q4), which was solely coded on my own (w/ ref. cited in the HW3 Q4 code).
-# Reference to the DDPG algorithm can be found in the class materials.
-
-# Some other references:
-# [1] https://github.com/sfujim/TD3/blob/master/TD3.py: on the smooth regularization, network architecture design, and some other constants
+# Reference to the DDPG algorithm can be found in the class materials and
+# [1] https://github.com/vwxyzjn/cleanrl/blob/master/cleanrl/sac_continuous_action.py
+# [2] https://github.com/pranz24/pytorch-soft-actor-critic/
 
 import numpy as np
 import torch
@@ -22,38 +21,59 @@ def make_env():
 	env = make_dmc_env(env_name, np.random.randint(0, 1000000), flatten=True, use_pixels=False)
 	return env
 
-
-# Actor (policy network)
-class Actor(nn.Module):
-    def __init__(self, state_dim, act_dim, max_action, hidden_dim=256):
+class MLP(nn.Module):
+    def __init__(self, input_dim, output_dim, hidden_dim=256):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(state_dim, hidden_dim),
+        self.model = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, act_dim),
-            nn.Tanh() # output: [-1, 1]
+            nn.Linear(hidden_dim, output_dim)
         )
+    def forward(self, x):
+        return self.model(x)
+
+class Actor(nn.Module): # GaussianPolicy
+    def __init__(self, state_dim, act_dim, max_action, hidden_dim=256):
+        super().__init__()
+        self.model = MLP(state_dim, act_dim*2, hidden_dim)
+        self.log_std_min = 0
+        self.log_std_max = max_action
         self.max_action = max_action
 
-    def forward(self, x):
-        return self.max_action * self.net(x) # scale
+    def forward(self, state):
+        mu, log_std = torch.chunk(self.model(state), 2, dim=-1)
+        std = log_std.clamp(self.log_std_min, self.log_std_max).exp()
+        distribution = torch.distributions.Normal(mu, std)
+        return distribution
 
+    def sample(self, state, eps=1e-6):
+        distribution = self(state)
+        x_t = distribution.rsample()
+        y_t = torch.tanh(x_t)
+        action = y_t * self.max_action + 0
+        log_prob = distribution.log_prob(x_t) - torch.log(1 - y_t.pow(2) + eps).sum(1, keepdim=True)
+        return action, log_prob
+        
 # Critic (value network)
 class Critic(nn.Module):
     def __init__(self, state_dim, act_dim, hidden_dim=256):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(state_dim + act_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, 1)
-        )
+        self.net = MLP(state_dim+act_dim, 1)
 
     def forward(self, x, u):
         return self.net(torch.cat([x, u], dim=-1))
+
+class DoubleCritic(nn.Module):
+    def __init__(self, state_dim, act_dim, hidden_dim=256):
+        super().__init__()
+        self.net1 = Critic(state_dim, act_dim, hidden_dim)
+        self.net2 = Critic(state_dim, act_dim, hidden_dim)
+
+    def forward(self, x, u):
+        return self.net1(x, u), self.net2(x, u)
+
 class ReplayBuffer:
     def __init__(self, size=100000, device='cpu'):
         self.buffer = deque(maxlen=size)
@@ -76,94 +96,81 @@ class ReplayBuffer:
     def __len__(self):
         return len(self.buffer)
 
-class TD3Agent:
-    def __init__(self, state_dim, act_dim, max_action, hidden_dim=256, lr=3e-4, device="cuda"):
+class SACAgent:
+    def __init__(self, state_dim, act_dim, max_action, hidden_dim=256, lr=2.5e-4, device="cuda"):
         
         self.device = device
         self.max_action = max_action
 
         # Two critics for minimization
         self.actor = Actor(state_dim, act_dim, max_action, hidden_dim=hidden_dim).to(self.device)
-        self.critic1 = Critic(state_dim, act_dim, hidden_dim=hidden_dim).to(self.device)
-        self.critic2 = Critic(state_dim, act_dim, hidden_dim=hidden_dim).to(self.device)
-
-        self.target_actor = Actor(state_dim, act_dim, max_action, hidden_dim=hidden_dim).to(self.device)
-        self.target_critic1 = Critic(state_dim, act_dim, hidden_dim=hidden_dim).to(self.device)
-        self.target_critic2 = Critic(state_dim, act_dim, hidden_dim=hidden_dim).to(self.device)
+        self.critic = DoubleCritic(state_dim, act_dim, hidden_dim=hidden_dim).to(self.device)
+        self.target_critic = DoubleCritic(state_dim, act_dim, hidden_dim=hidden_dim).to(self.device)
 
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=lr)
-        self.critic_optimizer1 = torch.optim.Adam(self.critic1.parameters(), lr=lr)
-        self.critic_optimizer2 = torch.optim.Adam(self.critic2.parameters(), lr=lr)
+        self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=lr)
         self.loss_func = nn.MSELoss()
 
+        self.update_every = 1
+
+        self.alpha = 0.2
         self.gamma = 0.99
         self.tau = 0.005 # soft update
-        self.batch_size = 256
+        self.batch_size = 64
         self.capacity = 1000000
         
-        self.policy_noise = 0.2
-        self.noise_clip = 0.5 # "c"
+        self.policy_noise = 0.2 * self.max_action
+        self.noise_clip = 0.5 * self.max_action # "c"
         self.policy_delay = 2
 
         self.replay_buffer = ReplayBuffer(size=self.capacity, device=device)
         self.step = 0
 
-        # Sync at the start
-        self.target_actor.load_state_dict(self.actor.state_dict())
-        self.target_critic1.load_state_dict(self.critic1.state_dict())
-        self.target_critic2.load_state_dict(self.critic2.state_dict())
+        self.target_critic.load_state_dict(self.critic.state_dict())
 
-    def act(self, obs, noise=0.01):
+    def act(self, obs, deterministic=True):
         obs = torch.tensor(obs, dtype=torch.float32).unsqueeze(0).to(self.device)
-        action = self.actor(obs).detach().cpu().numpy()[0]
-        action += noise * np.random.randn(*action.shape)
-        return np.clip(action, -self.max_action, self.max_action)
+        distribution = self.actor(obs)
+        if deterministic:
+            action = distribution.mean
+        else:
+            action = distribution.rsample()
+        return torch.tanh(action).detach().cpu().numpy()[0] * self.max_action
 
     def train(self):
-        if len(self.replay_buffer) < self.batch_size:
-            return np.nan, np.nan, np.nan
-
         self.step += 1
+        if self.step < self.batch_size:
+            return None, None, None
+        
         state, action, reward, next_state, done = self.replay_buffer.sample(self.batch_size)
 
         with torch.no_grad():
-            # Target policy smooth regularization
-            noise = (torch.randn_like(action) * self.policy_noise).clamp(-self.noise_clip, self.noise_clip) # "epsilon" ~ clip(N(0, sigma), -c, c)
-            next_action = (self.target_actor(next_state) + noise).clamp(-self.max_action, self.max_action)
-
-            target_q1 = self.target_critic1(next_state, next_action)
-            target_q2 = self.target_critic2(next_state, next_action)
+            next_action, log_prob =  self.actor.sample(next_state)
+            target_q1, target_q2 = self.target_critic(next_state, next_action)
             target_q = reward + self.gamma * (1 - done) * torch.min(target_q1, target_q2)
 
-        # Update critics
-        current_q1 = self.critic1(state, action)
-        current_q2 = self.critic2(state, action)
-
+        # [2]  JQ = 𝔼(st,at)~D[0.5(Q1(st,at) - r(st,at) - γ(𝔼st+1~p[V(st+1)]))^2]
+        current_q1, current_q2 = self.critic(state, action)
         critic_loss_1 = self.loss_func(current_q1, target_q)
         critic_loss_2 = self.loss_func(current_q2, target_q)
+        loss = critic_loss_1 + critic_loss_2
 
-        self.critic_optimizer1.zero_grad()
-        critic_loss_1.backward()
-        self.critic_optimizer1.step()
+        self.critic_optimizer.zero_grad()
+        loss.backward()
+        self.critic_optimizer.step()
 
-        self.critic_optimizer2.zero_grad()
-        critic_loss_2.backward()
-        self.critic_optimizer2.step()
+        next_action, log_prob = self.actor.sample(state) # with grad now
+        current_q = self.critic(state, next_action)[0] # pick q1
+        # [2]  Jπ = 𝔼st∼D,εt∼N[α * logπ(f(εt;st)|st) − Q(st,f(εt;st))]
+        actor_loss = (self.alpha * log_prob - current_q).mean()
 
-        # Delayed actor update
-        if self.step % self.policy_delay == 0:
-            actor_loss = -self.critic1(state, self.actor(state)).mean()
-            self.actor_optimizer.zero_grad()
-            actor_loss.backward()
-            self.actor_optimizer.step()
+        self.actor_optimizer.zero_grad()
+        actor_loss.backward()
+        self.actor_optimizer.step()
 
-            self._soft_update(self.target_actor, self.actor)
-            self._soft_update(self.target_critic1, self.critic1)
-            self._soft_update(self.target_critic2, self.critic2)
+        self._soft_update(self.target_critic, self.critic)
 
-            return actor_loss.item(), critic_loss_1.item(), critic_loss_2.item()
-        
-        return None, critic_loss_1.item(), critic_loss_2.item()
+        return actor_loss.item(), critic_loss_1.item(), critic_loss_2.item()
 
     def _soft_update(self, target, online):
         for t_param, param in zip(target.parameters(), online.parameters()):
@@ -172,23 +179,37 @@ class TD3Agent:
     def save(self):
         torch.save({
             "actor": self.actor.state_dict(),
-            "critic1": self.critic1.state_dict(),
-            "critic2": self.critic2.state_dict(),
-            "target_actor": self.target_actor.state_dict(),
-            "target_critic1": self.target_critic1.state_dict(),
-            "target_critic2": self.target_critic2.state_dict()
-        }, "ckpt_q3.pt")
+            "critic": self.critic.state_dict(),
+            "target_critic": self.target_critic.state_dict(),
+            "actor_optimizer": self.actor_optimizer.state_dict(),
+            "critic_optimizer": self.critic_optimizer.state_dict()
+        }, "ckpt_q3_sac.pt")
     
-    def load(self, ckpt_name="ckpt_q3.pt"):
+    def load(self, ckpt_name="ckpt_q3_sac.pt"):
         state_dict = torch.load(ckpt_name, map_location=torch.device(self.device), weights_only=True)
         self.actor.load_state_dict(state_dict["actor"])
-        self.critic1.load_state_dict(state_dict["critic1"])
-        self.critic2.load_state_dict(state_dict["critic2"])
-        self.target_actor.load_state_dict(state_dict["target_actor"])
-        self.target_critic1.load_state_dict(state_dict["target_critic1"])
-        self.target_critic2.load_state_dict(state_dict["target_critic2"])
+        self.critic.load_state_dict(state_dict["critic"])
+        self.target_critic.load_state_dict(state_dict["target_critic"])
+        self.actor_optimizer.load_state_dict(state_dict["actor_optimizer"])
+        self.critic_optimizer.load_state_dict(state_dict["critic_optimizer"])
 
-def train():
+def eval(env, agent):
+    obs, _ = env.reset()
+    total_reward = 0
+    done = False
+    step = 0
+    print(flush=True)
+    
+    while not done:
+        action = agent.act(obs, deterministic=True)
+        next_obs, reward, terminated, truncated, _ = env.step(action)
+        done = terminated or truncated
+        obs = next_obs
+        total_reward += reward
+        step += 1
+    print(f"[EVAL] Step = {step}, total reward = {total_reward}", flush=True)
+
+def train(load_ckpt=None):
 
     env = make_env()
     state_dim = env.observation_space.shape[0]
@@ -198,7 +219,9 @@ def train():
     print("Action dim:", act_dim)
     print("Max action:", max_action)
     
-    agent = TD3Agent(state_dim, act_dim, max_action, hidden_dim=1024, device="cuda", lr=1e-3)
+    agent = SACAgent(state_dim, act_dim, max_action, device="cuda")
+    if load_ckpt is not None:
+        agent.load(load_ckpt)
 
     reward_history = []
     num_episodes = 10000
@@ -208,37 +231,53 @@ def train():
         total_reward = 0
         done = False
         step = 0
-        actor_loss_print = np.nan
         print(flush=True)
+        
+        actor_loss_print, critic_loss_1_print, critic_loss_2_print = np.nan, np.nan, np.nan
 
         while not done:
-            action = agent.act(obs)
+            action = agent.act(obs, deterministic=False)
             next_obs, reward, terminated, truncated, _ = env.step(action)
             done = terminated or truncated
-            agent.replay_buffer.add((obs, action, reward, next_obs, float(done)))
-
+            
+            surrogate_reward = reward #-0.1 if reward < 1e-10 else reward # punish falling down
+            agent.replay_buffer.add((obs, action, surrogate_reward, next_obs, float(done)))
+            
             actor_loss, critic_loss_1, critic_loss_2 = agent.train()
+            
             obs = next_obs
             total_reward += reward
             step += 1
-
-            if actor_loss is not None:
-                actor_loss_print = actor_loss
-            print(f"\rStep: {step}, Reward: {reward}, Total reward: {total_reward:.2f}, Critics loss: {critic_loss_1:.10f}, {critic_loss_2:.10f}, Actor loss: {actor_loss_print:.10f}", end="", flush=True)
+            
+            def set_not_none(x, y):
+                if y is not None:
+                    return y
+                return x
+            actor_loss_print = set_not_none(actor_loss_print, actor_loss)
+            critic_loss_1_print = set_not_none(critic_loss_1_print, critic_loss_1)
+            critic_loss_2_print = set_not_none(critic_loss_2_print, critic_loss_2)
+        
+            print(f"\rStep: {step}, Reward: {reward}, Total reward: {total_reward:.2f}",
+                f"Critics loss: {critic_loss_1_print:.10f}, {critic_loss_2_print:.10f},",
+                f"Actor loss: {actor_loss_print:.10f}", end="", flush=True)
 
         agent.save()
         reward_history.append(total_reward)
         print(f"\nEpisode {episode}: step: {step}, total reward: {total_reward:.2f}     ", flush=True)
 
         if (episode+1)%10 == 0:
+            if episode > 499:
+                eval(env, agent)
             plt.plot(reward_history)
             plt.xlabel('Episode')
             plt.ylabel('Total Reward')
             plt.title('Training Progress')
-            plt.savefig('training_progress.png')
+            plt.savefig('training_progress_sac.png')
             plt.close()
+
 
     env.close()
 
 if __name__=="__main__":
-    train()
+    import sys
+    train(load_ckpt=sys.argv[1] if len(sys.argv)>=2 else None)

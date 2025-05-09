@@ -76,8 +76,9 @@ class ReplayBuffer:
 
 
 class DDPGAgent:
-    def __init__(self, state_dim, act_dim, max_action, device='cpu', lr=2.5e-4, hidden_dim=256):
+    def __init__(self, state_dim, act_dim, max_action, device='cpu', lr=2.5e-4, hidden_dim=256, postfix=""):
         self.device = device
+        self.postfix = postfix
         self.actor = Actor(state_dim, act_dim, max_action, hidden_dim).to(self.device)
         self.critic = Critic(state_dim, act_dim, hidden_dim).to(self.device)
         self.target_actor = Actor(state_dim, act_dim, max_action, hidden_dim).to(self.device)
@@ -104,31 +105,33 @@ class DDPGAgent:
             t_param.data.copy_(self.tau * param + (1 - self.tau) * t_param)
 
     def act(self, obs, deterministic=False):
-        obs_tensor = torch.tensor(obs, dtype=torch.float32).unsqueeze(0).to(self.device)
-        action = self.actor(obs_tensor)
+        obs_tensor = torch.tensor(obs, dtype=torch.float32).unsqueeze(0).to(self.device) # (1, 67)
+        action = self.actor(obs_tensor) # (1, 21)
         if not deterministic:
-            noise = torch.distributions.Normal(0, 0.2).rsample().to(self.device)
-            action = torch.clamp(action + noise * torch.rand_like(action), -self.max_action, self.max_action)
-        return action.detach().cpu().numpy()[0]
+            noise = torch.randn_like(action) * 0.2 # (1, 21)
+            action = torch.clamp(action + noise, -self.max_action, self.max_action)
+        action = action.squeeze(0).detach().cpu().numpy() # (21,)
+        return action
 
     def train(self):
         if len(self.replay_buffer) < self.batch_size:
             return np.nan, np.nan
 
         state, action, reward, next_state, done = self.replay_buffer.sample(self.batch_size)
+        # (B, 67), (B, 21), (B, 1), (B, 67), (B, 1)
 
         with torch.no_grad():
-            target_action = self.target_actor(next_state)
-            target_q = reward + self.gamma * (1 - done) * self.target_critic(next_state, target_action)
+            target_action = self.target_actor(next_state) # (B, 21)
+            target_q = reward + self.gamma * (1 - done) * self.target_critic(next_state, target_action) # (B, 1)
 
-        current_q = self.critic(state, action)
-        critic_loss = self.loss_func(current_q, target_q)
+        current_q = self.critic(state, action) # (B, 1)
+        critic_loss = self.loss_func(current_q, target_q) # (B, 1)
 
         self.critic_optimizer.zero_grad()
-        critic_loss.backward()
+        critic_loss.backward() # (1,)
         self.critic_optimizer.step()
 
-        actor_loss = -self.critic(state, self.actor(state)).mean()
+        actor_loss = -self.critic(state, self.actor(state)).mean() # (1,)
         self.actor_optimizer.zero_grad()
         actor_loss.backward()
         self.actor_optimizer.step()
@@ -143,8 +146,10 @@ class DDPGAgent:
             "actor": self.actor.state_dict(),
             "critic": self.critic.state_dict(),
             "target_actor": self.target_actor.state_dict(),
-            "target_critic": self.target_critic.state_dict()
-        }, "ckpt_q3_ddpg.pt")
+            "target_critic": self.target_critic.state_dict(),
+            "actor_optimizer": self.actor_optimizer.state_dict(),
+            "critic_optimizer": self.critic_optimizer.state_dict()
+        }, "ckpt_q3_ddpg"+self.postfix+".pt")
     
     def load(self, ckpt_name="ckpt_q3_ddpg.pt"):
         state_dict = torch.load(ckpt_name, map_location=torch.device(self.device), weights_only=True)
@@ -153,7 +158,11 @@ class DDPGAgent:
         self.target_actor.load_state_dict(state_dict["target_actor"])
         self.target_critic.load_state_dict(state_dict["target_critic"])
 
-def train():
+        if "actor_optimizer" in state_dict:
+            self.actor_optimizer.load_state_dict(state_dict["actor_optimizer"])
+            self.critic_optimizer.load_state_dict(state_dict["critic_optimizer"])
+
+def train(postfix, load_ckpt):
 
     env = make_env()
     state_dim = env.observation_space.shape[0]
@@ -163,7 +172,9 @@ def train():
     print("Action dim:", act_dim)
     print("Max action:", max_action)
     
-    agent = DDPGAgent(state_dim, act_dim, max_action, device="cuda")
+    agent = DDPGAgent(state_dim, act_dim, max_action, device="cuda", postfix="_3")
+    if load_ckpt is not None:
+        agent.load(load_ckpt)
 
     episode_rewards = []
     num_episodes = 10000
@@ -199,10 +210,13 @@ def train():
             plt.xlabel('Episode')
             plt.ylabel('Total Reward')
             plt.title('Training Progress')
-            plt.savefig('training_progress_ddpg.png')
+            plt.savefig('training_progress_ddpg'+postfix+'.png')
             plt.close()
 
     env.close()
 
 if __name__=="__main__":
-    train()
+    import sys
+    postfix = sys.argv[1] if len(sys.argv)>1 else ""
+    load_ckpt = sys.argv[2] if len(sys.argv)>2 else None
+    train(postfix, load_ckpt)
