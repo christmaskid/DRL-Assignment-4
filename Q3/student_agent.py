@@ -16,7 +16,8 @@ class Agent(object):
         # self.agent = TD3Agent(state_dim, act_dim, max_action, device="cpu")
         self.agent = DDPGAgent(state_dim, act_dim, max_action, device="cpu")
         # self.agent.load(ckpt_name="ckpt_q3_ddpg_3.pt")
-        self.agent.load(ckpt_name="ckpt_q3_ddpg_server.pt")
+        # self.agent.load(ckpt_name="ckpt_q3_ddpg_server.pt")
+        self.agent.load(ckpt_name="ws3/ckpt_q3_ddpg.pt")
 
     def act(self, observation):
         # return self.action_space.sample()
