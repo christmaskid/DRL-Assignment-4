@@ -2,6 +2,7 @@ import gymnasium as gym
 import numpy as np
 # from train import TD3Agent, make_env
 from train_ddpg import DDPGAgent, make_env
+import torch
 
 # Do not modify the input of the 'act' function and the '__init__' function. 
 class Agent(object):
@@ -17,8 +18,12 @@ class Agent(object):
         self.agent = DDPGAgent(state_dim, act_dim, max_action, device="cpu")
         # self.agent.load(ckpt_name="ckpt_q3_ddpg_3.pt")
         # self.agent.load(ckpt_name="ckpt_q3_ddpg_server.pt")
-        self.agent.load(ckpt_name="ws3/ckpt_q3_ddpg.pt")
+        ckpt_name = "ws3/ckpt_q3_ddpg-conti.pt"
+        print("Loading checkpoint:", ckpt_name, flush=True)
+        self.agent.load(ckpt_name=ckpt_name)
+        self.agent.actor.eval()
 
     def act(self, observation):
         # return self.action_space.sample()
-        return self.agent.act(observation, deterministic=True)
+        with torch.no_grad():
+            return self.agent.act(observation, deterministic=True)
