@@ -18,7 +18,7 @@ class Agent(object):
         self.agent = DDPGAgent(state_dim, act_dim, max_action, device="cpu")
         # self.agent.load(ckpt_name="ckpt_q3_ddpg_3.pt")
         # self.agent.load(ckpt_name="ckpt_q3_ddpg_server.pt")
-        ckpt_name = "ws3/ckpt_q3_ddpg-conti.pt"
+        ckpt_name = "ws3/ckpt_q3_ddpg-conti2.pt"
         print("Loading checkpoint:", ckpt_name, flush=True)
         self.agent.load(ckpt_name=ckpt_name)
         self.agent.actor.eval()
