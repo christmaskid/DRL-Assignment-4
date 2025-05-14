@@ -113,7 +113,7 @@ class SACAgent:
 
         self.update_every = 1
 
-        self.alpha = 0.2
+        self.alpha = 0.002
         self.gamma = 0.99
         self.tau = 0.005 # soft update
         self.batch_size = 64
@@ -147,7 +147,12 @@ class SACAgent:
         with torch.no_grad():
             next_action, log_prob =  self.actor.sample(next_state)
             target_q1, target_q2 = self.target_critic(next_state, next_action)
-            target_q = reward + self.gamma * (1 - done) * torch.min(target_q1, target_q2)
+            target_q = reward + self.gamma * (1 - done) * (\
+                    torch.min(target_q2, target_q2) - self.alpha * log_prob)
+            # Thanks for 陳冠宏 for helping me debug!!
+            # print(target_q1.shape, target_q2.shape, log_prob.shape, flush=True)
+            # (64, 1), (64, 1), (64, 21)
+            
 
         # [2]  JQ = 𝔼(st,at)~D[0.5(Q1(st,at) - r(st,at) - γ(𝔼st+1~p[V(st+1)]))^2]
         current_q1, current_q2 = self.critic(state, action)
