@@ -2,7 +2,7 @@ import gymnasium as gym
 import numpy as np
 # from train import TD3Agent, make_env
 from train_ddpg import DDPGAgent, make_env
-from train_sac import SACAgent
+from train_sac_fixed2 import SACAgent
 import torch
 
 # Do not modify the input of the 'act' function and the '__init__' function. 
